@@ -981,27 +981,60 @@ uint256 WantedByOrphan(const CBlock* pblockOrphan)
 }
 
 // miner's coin base reward
+static const int64_t nBlocksPerYear = 365LL * 24 * 60;
+static const int64_t nBlocksPerCentury = nBlocksPerYear * 100;
+static const int64_t nEpochOneSupply = 42000000 * COIN;
+static const int64_t nEpochTwoSupply = 21000000 * COIN;
+static const int64_t nEpochOneBaseReward = nEpochOneSupply / nBlocksPerCentury;
+static const int64_t nEpochOneRemainder = nEpochOneSupply % nBlocksPerCentury;
+static const int64_t nEpochTwoBaseReward = nEpochTwoSupply / nBlocksPerCentury;
+static const int64_t nEpochTwoRemainder = nEpochTwoSupply % nBlocksPerCentury;
+
+static int64_t GetEpochSupplyCap(int nHeight)
+{
+    if (nHeight < nBlocksPerCentury)
+        return nEpochOneSupply;
+    if (nHeight < nBlocksPerCentury * 2)
+        return nEpochOneSupply + nEpochTwoSupply;
+    return nEpochOneSupply + nEpochTwoSupply;
+}
+
+static int64_t GetEpochSubsidy(int nHeight)
+{
+    if (nHeight < nBlocksPerCentury)
+        return nEpochOneBaseReward + ((nHeight % nBlocksPerCentury) < nEpochOneRemainder ? 1 : 0);
+    if (nHeight < nBlocksPerCentury * 2)
+        return nEpochTwoBaseReward + ((nHeight % nBlocksPerCentury) < nEpochTwoRemainder ? 1 : 0);
+    return 0;
+}
+
+static int64_t GetEpochMintedAtHeight(int nHeight)
+{
+    if (nHeight <= 0)
+        return 0;
+
+    if (nHeight <= nBlocksPerCentury)
+    {
+        return nEpochOneBaseReward * nHeight +
+            std::min<int64_t>(nEpochOneRemainder, nHeight);
+    }
+
+    if (nHeight <= nBlocksPerCentury * 2)
+    {
+        int64_t nSecondHeight = nHeight - nBlocksPerCentury;
+        return nEpochOneSupply +
+            nEpochTwoBaseReward * nSecondHeight +
+            std::min<int64_t>(nEpochTwoRemainder, nSecondHeight);
+    }
+
+    return nEpochOneSupply + nEpochTwoSupply;
+}
+
 int64_t GetProofOfWorkReward(int64_t nFees)
 {
-    int64_t nSubsidy = 0 * COIN;
- 
-    if(pindexBest->nHeight+1 <= 2)
-    {
-        nSubsidy = 5000000 * COIN;
-    }
-	     else if(pindexBest->nHeight+1 >= 3  && pindexBest->nHeight+1 <= 201)
-    {
-        nSubsidy = 1 * COIN;
-    }
-        else if(pindexBest->nHeight+1 >= 201  && pindexBest->nHeight+1 <= 210101)
-    {
-        nSubsidy = 2 * COIN;
-    }
-        else if(pindexBest->nHeight+1 >= 210102)
-    {
-        nSubsidy = 5 * COIN;
-    }
-      
+    int nHeight = pindexBest ? (pindexBest->nHeight + 1) : 0;
+    int64_t nSubsidy = GetEpochSubsidy(nHeight);
+
     if (fDebug && GetBoolArg("-printcreation"))
         printf("GetProofOfWorkReward() : create=%s nSubsidy=%"PRId64"\n", FormatMoney(nSubsidy).c_str(), nSubsidy);
 
@@ -1011,11 +1044,8 @@ int64_t GetProofOfWorkReward(int64_t nFees)
 // miner's coin stake reward based on coin age spent (coin-days)
 int64_t GetProofOfStakeReward(int64_t nCoinAge, int64_t nFees)
 {
-    
-    // proof of stake rewards. POS begins at block 2700
-    
-    int64_t nSubsidy = nCoinAge * COIN_YEAR_REWARD * 33 / (365 * 33 + 8);  //default 9% yr
-    
+    int nHeight = pindexBest ? (pindexBest->nHeight + 1) : 0;
+    int64_t nSubsidy = GetEpochSubsidy(nHeight);
 
     if (fDebug && GetBoolArg("-printcreation"))
         printf("GetProofOfStakeReward(): create=%s nCoinAge=%"PRId64"\n", FormatMoney(nSubsidy).c_str(), nCoinAge);
@@ -1615,6 +1645,10 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex, bool fJustCheck)
     // ppcoin: track money supply and mint amount info
     pindex->nMint = nValueOut - nValueIn + nFees;
     pindex->nMoneySupply = (pindex->pprev? pindex->pprev->nMoneySupply : 0) + nValueOut - nValueIn;
+    if (pindex->nMoneySupply > GetEpochSupplyCap(pindex->nHeight))
+        return DoS(100, error("ConnectBlock() : money supply cap exceeded (%"PRId64")", pindex->nMoneySupply));
+    if (pindex->nMoneySupply > GetEpochMintedAtHeight(pindex->nHeight))
+        return DoS(100, error("ConnectBlock() : minted supply exceeded (%"PRId64")", pindex->nMoneySupply));
     if (!txdb.WriteBlockIndex(CDiskBlockIndex(pindex)))
         return error("Connect() : WriteBlockIndex for pindex failed");
 
@@ -2669,6 +2703,25 @@ void PrintBlockTree()
     }
 }
 
+static bool ReadCompressedBlock(CAutoFile& blkdat, CBlock& block)
+{
+    unsigned int nCompressedSize = 0;
+    blkdat >> nCompressedSize;
+    if (nCompressedSize == 0 || nCompressedSize > MAX_BLOCK_SIZE)
+        return false;
+
+    CDataStream compressed(SER_DISK, CLIENT_VERSION);
+    compressed.resize(nCompressedSize);
+    blkdat.read(&compressed[0], nCompressedSize);
+
+    CDataStream blockData(SER_DISK, CLIENT_VERSION);
+    if (!blockData.decompress(compressed))
+        return false;
+
+    blockData >> block;
+    return true;
+}
+
 bool LoadExternalBlockFile(FILE* fileIn)
 {
     int64_t nStart = GetTimeMillis();
@@ -2711,7 +2764,17 @@ bool LoadExternalBlockFile(FILE* fileIn)
                 if (nSize > 0 && nSize <= MAX_BLOCK_SIZE)
                 {
                     CBlock block;
-                    blkdat >> block;
+                    if (nSize & 0x80000000)
+                    {
+                        nSize &= 0x7fffffff;
+                        blkdat >> nSize;
+                        if (!ReadCompressedBlock(blkdat, block))
+                            continue;
+                    }
+                    else
+                    {
+                        blkdat >> block;
+                    }
                     if (ProcessBlock(NULL,&block))
                     {
                         nLoaded++;

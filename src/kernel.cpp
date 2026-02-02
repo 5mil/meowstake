@@ -27,11 +27,12 @@ static std::map<int, unsigned int> mapStakeModifierCheckpointsTestNet =
 // Get time weight
 int64_t GetWeight(int64_t nIntervalBeginning, int64_t nIntervalEnd)
 {
-    // Kernel hash weight starts from 0 at the min age
-    // this change increases active coins participating the hash and helps
-    // to secure the network when proof-of-stake difficulty is low
-
-    return min(nIntervalEnd - nIntervalBeginning - nStakeMinAge, (int64_t)nStakeMaxAge);
+    // Principia-inspired linear weight (no exponential scaling), capped by max age.
+    // Uses only non-negative intervals.
+    int64_t nTimeWeight = nIntervalEnd - nIntervalBeginning - nStakeMinAge;
+    if (nTimeWeight < 0)
+        nTimeWeight = 0;
+    return min(nTimeWeight, (int64_t)nStakeMaxAge);
 }
 
 // Get the last stake modifier and its generation time from a given block
@@ -279,7 +280,8 @@ bool CheckStakeKernelHash(unsigned int nBits, const CBlock& blockFrom, unsigned 
 
     uint256 hashBlockFrom = blockFrom.GetHash();
 
-    CBigNum bnCoinDayWeight = CBigNum(nValueIn) * GetWeight((int64_t)txPrev.nTime, (int64_t)nTimeTx) / COIN / (24 * 60 * 60);
+    int64_t nWeight = GetWeight((int64_t)txPrev.nTime, (int64_t)nTimeTx);
+    CBigNum bnCoinDayWeight = CBigNum(nValueIn) * nWeight / COIN / (24 * 60 * 60);
     targetProofOfStake = (bnCoinDayWeight * bnTargetPerCoinDay).getuint256();
 
     // Calculate hash
