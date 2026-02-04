@@ -1030,6 +1030,27 @@ static int64_t GetEpochMintedAtHeight(int nHeight)
     return nEpochOneSupply + nEpochTwoSupply;
 }
 
+bool WriteCompressedBlock(CAutoFile& fileout, const CBlock& block, unsigned int& nBlockPosRet)
+{
+    CDataStream raw(SER_DISK, CLIENT_VERSION);
+    raw << block;
+
+    CDataStream compressed(SER_DISK, CLIENT_VERSION);
+    bool fCompressed = raw.compress(compressed);
+    if (!fCompressed)
+        return false;
+
+    unsigned int nSize = compressed.size();
+    fileout << FLATDATA(pchMessageStart) << (nSize | 0x80000000);
+    long fileOutPos = ftell(fileout);
+    if (fileOutPos < 0)
+        return error("CBlock::WriteToDisk() : ftell failed");
+    nBlockPosRet = fileOutPos;
+    fileout << nSize;
+    fileout.write(&compressed[0], nSize);
+    return true;
+}
+
 int64_t GetProofOfWorkReward(int64_t nFees)
 {
     int nHeight = pindexBest ? (pindexBest->nHeight + 1) : 0;
@@ -2761,26 +2782,24 @@ bool LoadExternalBlockFile(FILE* fileIn)
                 fseek(blkdat, nPos, SEEK_SET);
                 unsigned int nSize;
                 blkdat >> nSize;
-                if (nSize > 0 && nSize <= MAX_BLOCK_SIZE)
-                {
-                    CBlock block;
-                    if (nSize & 0x80000000)
-                    {
-                        nSize &= 0x7fffffff;
-                        blkdat >> nSize;
-                        if (!ReadCompressedBlock(blkdat, block))
-                            continue;
-                    }
-                    else
-                    {
-                        blkdat >> block;
-                    }
-                    if (ProcessBlock(NULL,&block))
-                    {
-                        nLoaded++;
-                        nPos += 4 + nSize;
-                    }
-                }
+    if (nSize > 0 && nSize <= MAX_BLOCK_SIZE)
+    {
+        CBlock block;
+        if (nSize & 0x80000000)
+        {
+            nSize &= 0x7fffffff;
+            if (!ReadCompressedBlock(blkdat, block))
+                continue;
+            nPos += 4 + nSize;
+        }
+        else
+        {
+            blkdat >> block;
+            nPos += 4 + nSize;
+        }
+        if (ProcessBlock(NULL,&block))
+            nLoaded++;
+    }
             }
         }
         catch (std::exception &e) {

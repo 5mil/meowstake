@@ -130,6 +130,7 @@ uint256 WantedByOrphan(const CBlock* pblockOrphan);
 const CBlockIndex* GetLastBlockIndex(const CBlockIndex* pindex, bool fProofOfStake);
 void StakeMiner(CWallet *pwallet);
 void ResendWalletTransactions(bool fForce = false);
+bool WriteCompressedBlock(CAutoFile& fileout, const CBlock& block, unsigned int& nBlockPosRet);
 
 
 
@@ -1022,16 +1023,19 @@ public:
         if (!fileout)
             return error("CBlock::WriteToDisk() : AppendBlockFile failed");
 
-        // Write index header
-        unsigned int nSize = fileout.GetSerializeSize(*this);
-        fileout << FLATDATA(pchMessageStart) << nSize;
+        if (!WriteCompressedBlock(fileout, *this, nBlockPosRet))
+        {
+            // Write index header
+            unsigned int nSize = fileout.GetSerializeSize(*this);
+            fileout << FLATDATA(pchMessageStart) << nSize;
 
-        // Write block
-        long fileOutPos = ftell(fileout);
-        if (fileOutPos < 0)
-            return error("CBlock::WriteToDisk() : ftell failed");
-        nBlockPosRet = fileOutPos;
-        fileout << *this;
+            // Write block
+            long fileOutPos = ftell(fileout);
+            if (fileOutPos < 0)
+                return error("CBlock::WriteToDisk() : ftell failed");
+            nBlockPosRet = fileOutPos;
+            fileout << *this;
+        }
 
         // Flush stdio buffers and commit to disk before returning
         fflush(fileout);

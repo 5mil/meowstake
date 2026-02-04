@@ -7,13 +7,11 @@
 #define BITCOIN_SERIALIZE_H
 
 #include <string>
-#include <vector>
 #include <map>
 #include <set>
 #include <cassert>
 #include <limits>
 #include <stdint.h>
-#include <vector>
 #include <cstring>
 #include <cstdio>
 
@@ -706,26 +704,6 @@ struct ser_streamplaceholder
 
 
 typedef std::vector<char, zero_after_free_allocator<char> > CSerializeData;
-
-static inline void AppendLE32(std::vector<char>& out, uint32_t value)
-{
-    out.push_back(static_cast<char>(value & 0xff));
-    out.push_back(static_cast<char>((value >> 8) & 0xff));
-    out.push_back(static_cast<char>((value >> 16) & 0xff));
-    out.push_back(static_cast<char>((value >> 24) & 0xff));
-}
-
-static inline bool ReadLE32(const std::vector<char>& in, size_t& offset, uint32_t& value)
-{
-    if (offset + 4 > in.size())
-        return false;
-    value = static_cast<unsigned char>(in[offset]) |
-            (static_cast<unsigned char>(in[offset + 1]) << 8) |
-            (static_cast<unsigned char>(in[offset + 2]) << 16) |
-            (static_cast<unsigned char>(in[offset + 3]) << 24);
-    offset += 4;
-    return true;
-}
 
 static inline bool CompressBlockData(const std::vector<char>& input, std::vector<char>& output)
 {
