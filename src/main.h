@@ -38,7 +38,7 @@ static const unsigned int MAX_ORPHAN_TRANSACTIONS = MAX_BLOCK_SIZE/100;
 static const unsigned int MAX_INV_SZ = 50000;
 static const int64_t MIN_TX_FEE =  100000;
 static const int64_t MIN_RELAY_TX_FEE = MIN_TX_FEE;
-static const int64_t MAX_MONEY = 850000000 * COIN;
+static const int64_t MAX_MONEY = 63000000 * COIN;
 static const int64_t COIN_YEAR_REWARD = 42 * CENT; // 1% 
 //block number of first POS block?
 static const int MODIFIER_INTERVAL_SWITCH = 1001;
@@ -115,6 +115,7 @@ CBlockIndex* FindBlockByHeight(int nHeight);
 bool ProcessMessages(CNode* pfrom);
 bool SendMessages(CNode* pto, bool fSendTrickle);
 bool LoadExternalBlockFile(FILE* fileIn);
+bool ReadBlockFromDisk(unsigned int nFile, unsigned int nBlockPos, CDataStream& blockData, bool fReadTransactions);
 
 bool CheckProofOfWork(uint256 hash, unsigned int nBits);
 unsigned int GetNextTargetRequired(const CBlockIndex* pindexLast, bool fProofOfStake);
@@ -130,6 +131,7 @@ uint256 WantedByOrphan(const CBlock* pblockOrphan);
 const CBlockIndex* GetLastBlockIndex(const CBlockIndex* pindex, bool fProofOfStake);
 void StakeMiner(CWallet *pwallet);
 void ResendWalletTransactions(bool fForce = false);
+bool WriteCompressedBlock(CAutoFile& fileout, const CBlock& block, unsigned int& nBlockPosRet);
 
 
 
@@ -593,29 +595,33 @@ public:
 
     bool ReadFromDisk(CDiskTxPos pos, FILE** pfileRet=NULL)
     {
-        CAutoFile filein = CAutoFile(OpenBlockFile(pos.nFile, 0, pfileRet ? "rb+" : "rb"), SER_DISK, CLIENT_VERSION);
-        if (!filein)
+        if (pfileRet)
+            return error("CTransaction::ReadFromDisk() : compressed block storage unsupported with pfileRet");
+
+        CDataStream blockData(SER_DISK, CLIENT_VERSION);
+        if (!ReadBlockFromDisk(pos.nFile, pos.nBlockPos, blockData, true))
             return error("CTransaction::ReadFromDisk() : OpenBlockFile failed");
 
-        // Read transaction
-        if (fseek(filein, pos.nTxPos, SEEK_SET) != 0)
-            return error("CTransaction::ReadFromDisk() : fseek failed");
-
+        // Skip transactions until the requested offset
+        CBlock block;
         try {
-            filein >> *this;
+            blockData >> block;
         }
         catch (std::exception &e) {
             return error("%s() : deserialize or I/O error", __PRETTY_FUNCTION__);
         }
 
-        // Return file pointer
-        if (pfileRet)
+        unsigned int nTxPos = pos.nBlockPos + ::GetSerializeSize(CBlock(), SER_DISK, CLIENT_VERSION) - (2 * GetSizeOfCompactSize(0)) + GetSizeOfCompactSize(block.vtx.size());
+        for (unsigned int i = 0; i < block.vtx.size(); ++i)
         {
-            if (fseek(filein, pos.nTxPos, SEEK_SET) != 0)
-                return error("CTransaction::ReadFromDisk() : second fseek failed");
-            *pfileRet = filein.release();
+            if (nTxPos == pos.nTxPos)
+            {
+                *this = block.vtx[i];
+                return true;
+            }
+            nTxPos += ::GetSerializeSize(block.vtx[i], SER_DISK, CLIENT_VERSION);
         }
-        return true;
+        return false;
     }
 
     friend bool operator==(const CTransaction& a, const CTransaction& b)
@@ -1022,16 +1028,19 @@ public:
         if (!fileout)
             return error("CBlock::WriteToDisk() : AppendBlockFile failed");
 
-        // Write index header
-        unsigned int nSize = fileout.GetSerializeSize(*this);
-        fileout << FLATDATA(pchMessageStart) << nSize;
+        if (!WriteCompressedBlock(fileout, *this, nBlockPosRet))
+        {
+            // Write index header
+            unsigned int nSize = fileout.GetSerializeSize(*this);
+            fileout << FLATDATA(pchMessageStart) << nSize;
 
-        // Write block
-        long fileOutPos = ftell(fileout);
-        if (fileOutPos < 0)
-            return error("CBlock::WriteToDisk() : ftell failed");
-        nBlockPosRet = fileOutPos;
-        fileout << *this;
+            // Write block
+            long fileOutPos = ftell(fileout);
+            if (fileOutPos < 0)
+                return error("CBlock::WriteToDisk() : ftell failed");
+            nBlockPosRet = fileOutPos;
+            fileout << *this;
+        }
 
         // Flush stdio buffers and commit to disk before returning
         fflush(fileout);
@@ -1045,16 +1054,12 @@ public:
     {
         SetNull();
 
-        // Open history file to read
-        CAutoFile filein = CAutoFile(OpenBlockFile(nFile, nBlockPos, "rb"), SER_DISK, CLIENT_VERSION);
-        if (!filein)
-            return error("CBlock::ReadFromDisk() : OpenBlockFile failed");
-        if (!fReadTransactions)
-            filein.nType |= SER_BLOCKHEADERONLY;
+        CDataStream blockData(SER_DISK, CLIENT_VERSION);
+        if (!ReadBlockFromDisk(nFile, nBlockPos, blockData, fReadTransactions))
+            return error("CBlock::ReadFromDisk() : failed to read block data");
 
-        // Read block
         try {
-            filein >> *this;
+            blockData >> *this;
         }
         catch (std::exception &e) {
             return error("%s() : deserialize or I/O error", __PRETTY_FUNCTION__);

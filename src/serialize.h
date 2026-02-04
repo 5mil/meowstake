@@ -7,7 +7,6 @@
 #define BITCOIN_SERIALIZE_H
 
 #include <string>
-#include <vector>
 #include <map>
 #include <set>
 #include <cassert>
@@ -706,6 +705,75 @@ struct ser_streamplaceholder
 
 typedef std::vector<char, zero_after_free_allocator<char> > CSerializeData;
 
+static inline bool CompressBlockData(const std::vector<char>& input, std::vector<char>& output)
+{
+    output.clear();
+    if (input.empty())
+        return true;
+
+    const size_t nSize = input.size();
+    size_t i = 0;
+    while (i < nSize)
+    {
+        size_t run = 1;
+        while (i + run < nSize && input[i + run] == input[i] && run < 255)
+            ++run;
+
+        if (run >= 4)
+        {
+            output.push_back(static_cast<char>(0));
+            output.push_back(static_cast<char>(run));
+            output.push_back(input[i]);
+            i += run;
+            continue;
+        }
+
+        size_t literalStart = i;
+        size_t literalLen = 0;
+        while (i < nSize && literalLen < 255)
+        {
+            size_t lookahead = 1;
+            while (i + lookahead < nSize && input[i + lookahead] == input[i] && lookahead < 255)
+                ++lookahead;
+            if (lookahead >= 4)
+                break;
+            ++i;
+            ++literalLen;
+        }
+
+        output.push_back(static_cast<char>(literalLen));
+        output.insert(output.end(), input.begin() + literalStart, input.begin() + literalStart + literalLen);
+    }
+
+    return output.size() < input.size();
+}
+
+static inline bool DecompressBlockData(const std::vector<char>& input, std::vector<char>& output)
+{
+    output.clear();
+    size_t i = 0;
+    while (i < input.size())
+    {
+        unsigned char marker = static_cast<unsigned char>(input[i++]);
+        if (marker == 0)
+        {
+            if (i + 2 > input.size())
+                return false;
+            unsigned char run = static_cast<unsigned char>(input[i++]);
+            char value = input[i++];
+            output.insert(output.end(), run, value);
+        }
+        else
+        {
+            if (i + marker > input.size())
+                return false;
+            output.insert(output.end(), input.begin() + i, input.begin() + i + marker);
+            i += marker;
+        }
+    }
+    return true;
+}
+
 /** Double ended buffer combining vector and stream-like interfaces.
  *
  * >> and << read and write unformatted data using the above serialization templates.
@@ -1000,6 +1068,31 @@ public:
     void GetAndClear(CSerializeData &data) {
         data.insert(data.end(), begin(), end());
         clear();
+    }
+
+    void GetRaw(std::vector<char>& data) const {
+        data.assign(begin(), end());
+    }
+
+    bool compress(CDataStream& out) const {
+        std::vector<char> raw;
+        GetRaw(raw);
+        std::vector<char> compressed;
+        if (!CompressBlockData(raw, compressed))
+            return false;
+        out.clear();
+        out.insert(out.begin(), compressed.begin(), compressed.end());
+        return true;
+    }
+
+    bool decompress(const CDataStream& in) {
+        std::vector<char> rawIn(in.begin(), in.end());
+        std::vector<char> decompressed;
+        if (!DecompressBlockData(rawIn, decompressed))
+            return false;
+        clear();
+        insert(begin(), decompressed.begin(), decompressed.end());
+        return true;
     }
 };
 
