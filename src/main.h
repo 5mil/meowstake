@@ -115,6 +115,7 @@ CBlockIndex* FindBlockByHeight(int nHeight);
 bool ProcessMessages(CNode* pfrom);
 bool SendMessages(CNode* pto, bool fSendTrickle);
 bool LoadExternalBlockFile(FILE* fileIn);
+bool ReadBlockFromDisk(unsigned int nFile, unsigned int nBlockPos, CDataStream& blockData, bool fReadTransactions);
 
 bool CheckProofOfWork(uint256 hash, unsigned int nBits);
 unsigned int GetNextTargetRequired(const CBlockIndex* pindexLast, bool fProofOfStake);
@@ -594,29 +595,33 @@ public:
 
     bool ReadFromDisk(CDiskTxPos pos, FILE** pfileRet=NULL)
     {
-        CAutoFile filein = CAutoFile(OpenBlockFile(pos.nFile, 0, pfileRet ? "rb+" : "rb"), SER_DISK, CLIENT_VERSION);
-        if (!filein)
+        if (pfileRet)
+            return error("CTransaction::ReadFromDisk() : compressed block storage unsupported with pfileRet");
+
+        CDataStream blockData(SER_DISK, CLIENT_VERSION);
+        if (!ReadBlockFromDisk(pos.nFile, pos.nBlockPos, blockData, true))
             return error("CTransaction::ReadFromDisk() : OpenBlockFile failed");
 
-        // Read transaction
-        if (fseek(filein, pos.nTxPos, SEEK_SET) != 0)
-            return error("CTransaction::ReadFromDisk() : fseek failed");
-
+        // Skip transactions until the requested offset
+        CBlock block;
         try {
-            filein >> *this;
+            blockData >> block;
         }
         catch (std::exception &e) {
             return error("%s() : deserialize or I/O error", __PRETTY_FUNCTION__);
         }
 
-        // Return file pointer
-        if (pfileRet)
+        unsigned int nTxPos = pos.nBlockPos + ::GetSerializeSize(CBlock(), SER_DISK, CLIENT_VERSION) - (2 * GetSizeOfCompactSize(0)) + GetSizeOfCompactSize(block.vtx.size());
+        for (unsigned int i = 0; i < block.vtx.size(); ++i)
         {
-            if (fseek(filein, pos.nTxPos, SEEK_SET) != 0)
-                return error("CTransaction::ReadFromDisk() : second fseek failed");
-            *pfileRet = filein.release();
+            if (nTxPos == pos.nTxPos)
+            {
+                *this = block.vtx[i];
+                return true;
+            }
+            nTxPos += ::GetSerializeSize(block.vtx[i], SER_DISK, CLIENT_VERSION);
         }
-        return true;
+        return false;
     }
 
     friend bool operator==(const CTransaction& a, const CTransaction& b)
@@ -1049,16 +1054,12 @@ public:
     {
         SetNull();
 
-        // Open history file to read
-        CAutoFile filein = CAutoFile(OpenBlockFile(nFile, nBlockPos, "rb"), SER_DISK, CLIENT_VERSION);
-        if (!filein)
-            return error("CBlock::ReadFromDisk() : OpenBlockFile failed");
-        if (!fReadTransactions)
-            filein.nType |= SER_BLOCKHEADERONLY;
+        CDataStream blockData(SER_DISK, CLIENT_VERSION);
+        if (!ReadBlockFromDisk(nFile, nBlockPos, blockData, fReadTransactions))
+            return error("CBlock::ReadFromDisk() : failed to read block data");
 
-        // Read block
         try {
-            filein >> *this;
+            blockData >> *this;
         }
         catch (std::exception &e) {
             return error("%s() : deserialize or I/O error", __PRETTY_FUNCTION__);

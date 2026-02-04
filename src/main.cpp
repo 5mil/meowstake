@@ -1041,16 +1041,54 @@ bool WriteCompressedBlock(CAutoFile& fileout, const CBlock& block, unsigned int&
         return false;
 
     unsigned int nSize = compressed.size();
-    fileout << FLATDATA(pchMessageStart) << (nSize | 0x80000000);
     long fileOutPos = ftell(fileout);
     if (fileOutPos < 0)
         return error("CBlock::WriteToDisk() : ftell failed");
     nBlockPosRet = fileOutPos;
-    fileout << nSize;
+    fileout << FLATDATA(pchMessageStart) << (nSize | 0x80000000);
     fileout.write(&compressed[0], nSize);
     return true;
 }
 
+bool ReadBlockFromDisk(unsigned int nFile, unsigned int nBlockPos, CDataStream& blockData, bool fReadTransactions)
+{
+    blockData.clear();
+    CAutoFile filein = CAutoFile(OpenBlockFile(nFile, 0, "rb"), SER_DISK, CLIENT_VERSION);
+    if (!filein)
+        return error("ReadBlockFromDisk() : OpenBlockFile failed");
+    if (fseek(filein, nBlockPos, SEEK_SET) != 0)
+        return error("ReadBlockFromDisk() : fseek failed");
+
+    unsigned char pchMsgStart[sizeof(pchMessageStart)];
+    filein.read((char*)pchMsgStart, sizeof(pchMessageStart));
+    if (memcmp(pchMsgStart, pchMessageStart, sizeof(pchMessageStart)) != 0)
+        return error("ReadBlockFromDisk() : message start mismatch");
+
+    unsigned int nSize = 0;
+    filein >> nSize;
+    bool fCompressed = (nSize & 0x80000000) != 0;
+    nSize &= 0x7fffffff;
+    if (nSize == 0 || nSize > MAX_BLOCK_SIZE)
+        return error("ReadBlockFromDisk() : block size out of range");
+
+    if (fCompressed)
+    {
+        CDataStream compressed(SER_DISK, CLIENT_VERSION);
+        compressed.resize(nSize);
+        filein.read(&compressed[0], nSize);
+        if (!blockData.decompress(compressed))
+            return error("ReadBlockFromDisk() : decompression failed");
+    }
+    else
+    {
+        blockData.resize(nSize);
+        filein.read(&blockData[0], nSize);
+    }
+
+    if (!fReadTransactions)
+        blockData.nType |= SER_BLOCKHEADERONLY;
+    return true;
+}
 int64_t GetProofOfWorkReward(int64_t nFees)
 {
     int nHeight = pindexBest ? (pindexBest->nHeight + 1) : 0;
@@ -2546,10 +2584,10 @@ bool LoadBlockIndex(bool fAllowNew)
 
     if (fTestNet)
     {
-        pchMessageStart[0] = 0xa5;
+        pchMessageStart[0] = 0xb5;
         pchMessageStart[1] = 0xf5;
-        pchMessageStart[2] = 0xc5;
-        pchMessageStart[3] = 0xa5;
+        pchMessageStart[2] = 0xd5;
+        pchMessageStart[3] = 0xb5;
 
         bnTrustedModulus.SetHex("f0d14cf72623dacfe738d0892b599be0f31052239cddd95a3f25101c801dc990453b38c9434efe3f372db39a32c2bb44cbaea72d62c8931fa785b0ec44531308df3e46069be5573e49bb29f4d479bfc3d162f57a5965db03810be7636da265bfced9c01a6b0296c77910ebdc8016f70174f0f18a57b3b971ac43a934c6aedbc5c866764a3622b5b7e3f9832b8b3f133c849dbcc0396588abcd1e41048555746e4823fb8aba5b3d23692c6857fccce733d6bb6ec1d5ea0afafecea14a0f6f798b6b27f77dc989c557795cc39a0940ef6bb29a7fc84135193a55bcfc2f01dd73efad1b69f45a55198bd0e6bef4d338e452f6a420f1ae2b1167b923f76633ab6e55");
         bnProofOfWorkLimit = bnProofOfWorkLimitTestNet; // 16 bits PoW target limit for testnet
@@ -2907,7 +2945,7 @@ bool static AlreadyHave(CTxDB& txdb, const CInv& inv)
 // The message start string is designed to be unlikely to occur in normal data.
 // The characters are rarely used upper ASCII, not valid as UTF-8, and produce
 // a large 4-byte int at any alignment.
-unsigned char pchMessageStart[4] = { 0xa5, 0xf5, 0xe5, 0xb5 };
+unsigned char pchMessageStart[4] = { 0xb5, 0xf5, 0xe5, 0xa5 };
 
 bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
 {

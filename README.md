@@ -13,8 +13,7 @@ Short: PURR
 Algorithm SHA256
 
 
-RPC Port: 16384
-P2P Port: 16385
+RPC Port: 18384
+P2P Port: 18385
 
 See bitcointalk.org Meowstake thread for more info
-
